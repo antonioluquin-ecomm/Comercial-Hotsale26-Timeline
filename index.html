@@ -3352,9 +3352,12 @@ body.light .corporate-date-card {
     // Para actualizar tareas o estados, editá directamente el Sheets vinculado.
     // ─────────────────────────────────────────────────────────────────────────
     const SHEETS_CSV_DIRECT = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRB0azDGVt8LGtA2OIWUQfNrIZrfI4kCL2RNdgzHbsZOoNBMFiw5T5S-GMSEPphMnKGdOwaJ7BEUuOZ/pub?gid=189346414&single=true&output=csv";
-    // Proxy CORS — necesario cuando el HTML se abre como archivo local
-    const PROXY = "https://api.allorigins.win/raw?url=";
-    const SHEETS_CSV_URL = PROXY + encodeURIComponent(SHEETS_CSV_DIRECT);
+    // Múltiples estrategias de fetch en orden de prioridad
+    const FETCH_STRATEGIES = [
+      () => fetch(SHEETS_CSV_DIRECT, { cache: "no-store" }),
+      () => fetch("https://api.allorigins.win/raw?url=" + encodeURIComponent(SHEETS_CSV_DIRECT), { cache: "no-store" }),
+      () => fetch("https://corsproxy.io/?" + encodeURIComponent(SHEETS_CSV_DIRECT), { cache: "no-store" }),
+    ];
 
     // Fallback: datos estáticos por si el Sheets no responde
     let tasks = [
@@ -4205,39 +4208,52 @@ body.light .corporate-date-card {
       }
     }
 
-    // ─── Carga principal desde Google Sheets ─────────────────────────────────
+    // ─── Carga principal desde Google Sheets (con fallback en cascada) ────────
+    async function tryFetch() {
+      for (const strategy of FETCH_STRATEGIES) {
+        try {
+          const res = await strategy();
+          if (!res.ok) continue;
+          const text = await res.text();
+          // Validar que sea CSV real (no página de error HTML)
+          if (text.trim().startsWith("<")) continue;
+          return text;
+        } catch (e) {
+          console.warn("Estrategia falló, probando siguiente…", e.message);
+        }
+      }
+      return null;
+    }
+
     async function loadFromSheets() {
       showBanner("⏳ Sincronizando con Google Sheets…");
-      try {
-        const res = await fetch(SHEETS_CSV_URL, { cache: "no-store" });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
-        const rows = parseCSV(text);
-        const fetched = csvToTasks(rows);
-        if (!fetched.length) throw new Error("Sin filas de datos");
-
-        tasks = fetched;
-        const meta = computeAreaMeta(tasks);
-        // Actualiza las variables globales usadas por el render
-        window._allAreas   = meta.areas;
-        window._areaCounts = meta.counts;
-
-        renderAll();
-        showBanner("✅ Datos actualizados desde Google Sheets", "ok");
-        // Refresca cada 60 segundos automáticamente
-        setTimeout(loadFromSheets, 60_000);
-      } catch (err) {
-        console.warn("No se pudo cargar el Sheets, usando datos locales.", err);
-        showBanner(
-          '⚠️ No se pudo conectar con Google Sheets. <strong>Verificá que el archivo esté publicado en la web</strong> (Archivo → Compartir → Publicar en la web).',
-          "warning"
-        );
-        // Usar fallback estático con la meta calculada
-        const meta = computeAreaMeta(tasks);
-        window._allAreas   = meta.areas;
-        window._areaCounts = meta.counts;
-        renderAll();
+      const text = await tryFetch();
+      if (text) {
+        try {
+          const rows = parseCSV(text);
+          const fetched = csvToTasks(rows);
+          if (!fetched.length) throw new Error("Sin filas de datos");
+          tasks = fetched;
+          const meta = computeAreaMeta(tasks);
+          window._allAreas   = meta.areas;
+          window._areaCounts = meta.counts;
+          renderAll();
+          showBanner("✅ Sincronizado con Google Sheets", "ok");
+          setTimeout(loadFromSheets, 60_000);
+          return;
+        } catch (parseErr) {
+          console.warn("Error parseando CSV:", parseErr);
+        }
       }
+      // Fallback estático
+      console.warn("Usando datos estáticos de respaldo.");
+      showBanner("⚠️ Sin conexión con Sheets — mostrando datos locales", "warning");
+      const meta = computeAreaMeta(tasks);
+      window._allAreas   = meta.areas;
+      window._areaCounts = meta.counts;
+      renderAll();
+      // Reintentar en 30 segundos
+      setTimeout(loadFromSheets, 30_000);
     }
 
     function nextStatus(currentStatus) {
